@@ -1383,6 +1383,7 @@ if st.button("◈  Generate Deal Quote & PDF Invoice"):
             st.warning("Install ReportLab: pip install reportlab")
         except Exception as e:
             st.error(f"PDF error: {e}")
+            url = f"https://wa.me/?text={quote}"
 
 # ── FOOTER ───────────────────────────────────────────────────────────────────
 st.markdown("""
