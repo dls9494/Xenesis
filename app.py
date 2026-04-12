@@ -1406,3 +1406,4 @@ st.markdown("""
 if st.session_state.auto_refresh:
     time.sleep(10)
     st.rerun()
+    score = (predicted_spread - current_spread) * volume
