@@ -681,7 +681,7 @@ def predict_spread():
 
 # ── Session state ─────────────────────────────────────────────────────────────
 if "trader_name" not in st.session_state:
-    st.session_state.trader_name = "Desk Officer"
+    st.session_state.trader_name = "David"
 if "city" not in st.session_state:
     st.session_state.city = "Hyderabad"
 if "auto_refresh" not in st.session_state:
