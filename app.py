@@ -623,6 +623,20 @@ hr { border-color: var(--border2) !important; }
 </style>
 """, unsafe_allow_html=True)
 
+# ── Constants ─────────────────────────────────────────────────────────────────
+CITY_PREMIUM = {
+    "Hyderabad":  0.003,
+    "Mumbai":     0.004,
+    "Delhi":      0.004,
+    "Bangalore":  0.003,
+    "Chennai":    0.003,
+    "Kolkata":    0.0035,
+    "Pune":       0.003,
+    "Ahmedabad":  0.003,
+    "Surat":      0.003,
+    "Jaipur":     0.0035,
+}
+
 # ── Database ──────────────────────────────────────────────────────────────────
 @st.cache_resource
 def get_db():
