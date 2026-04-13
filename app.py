@@ -1482,61 +1482,74 @@ def get_db():
     return conn
 
 
-# ── NEW FETCH FUNCTION ──────────────────────────────────────────────────────
+# ── FETCH FUNCTION (Smart Fallback) ─────────────────────────────────────────
 @st.cache_data(ttl=10)
 def fetch_binance_p2p_filtered(side: str, min_usdt: float = 5000):
-    url = "https://p2p.binance.com/bapi/c2c/v2/friendly/c2c/adv/search"
+    thresholds = [min_usdt, 3000, 2000, 1000]
 
-    payload = {
-        "asset": "USDT",
-        "fiat": "INR",
-        "merchantCheck": False,
-        "page": 1,
-        "payTypes": [],
-        "publisherType": None,
-        "rows": 50,
-        "tradeType": side
-    }
+    for threshold in thresholds:
+        url = "https://p2p.binance.com/bapi/c2c/v2/friendly/c2c/adv/search"
 
-    try:
-        r = requests.post(url, json=payload, headers={"Content-Type": "application/json"}, timeout=8)
-        data = r.json().get("data", [])
+        payload = {
+            "asset": "USDT",
+            "fiat": "INR",
+            "merchantCheck": False,
+            "page": 1,
+            "payTypes": [],
+            "publisherType": None,
+            "rows": 50,
+            "tradeType": side
+        }
 
-        ads = []
-        total_value = 0
-        total_qty = 0
+        try:
+            r = requests.post(
+                url,
+                json=payload,
+                headers={"Content-Type": "application/json"},
+                timeout=8
+            )
 
-        for ad in data:
-            adv = ad["adv"]
+            data = r.json().get("data", [])
 
-            price = float(adv["price"])
-            available = float(adv.get("surplusAmount", 0))
-            tradable = float(adv.get("tradableQuantity", 0))
-            quantity = max(available, tradable)
+            ads = []
+            total_value = 0
+            total_qty = 0
 
-            if quantity >= min_usdt:
-                total_value += price * quantity
-                total_qty += quantity
+            for ad in data:
+                adv = ad["adv"]
 
-                ads.append({
-                    "Trader": ad["advertiser"]["nickName"],
-                    "Price": price,
-                    "USDT": quantity,
-                    "Min INR": adv.get("minSingleTransAmount"),
-                    "Max INR": adv.get("maxSingleTransAmount"),
-                })
+                price = float(adv["price"])
+                available = float(adv.get("surplusAmount", 0))
+                tradable = float(adv.get("tradableQuantity", 0))
+                quantity = max(available, tradable)
 
-        weighted_avg = round(total_value / total_qty, 2) if total_qty else None
+                if quantity >= threshold:
+                    total_value += price * quantity
+                    total_qty += quantity
 
-        ads = sorted(ads, key=lambda x: x["USDT"], reverse=True)
+                    ads.append({
+                        "Trader": ad["advertiser"]["nickName"],
+                        "Price": price,
+                        "USDT": quantity,
+                        "Min INR": adv.get("minSingleTransAmount"),
+                        "Max INR": adv.get("maxSingleTransAmount"),
+                    })
 
-        for i, ad in enumerate(ads):
-            ad["Tag"] = "🐋 WHALE" if i < 3 else ""
+            # ✅ Found data → stop fallback, return results
+            if ads:
+                weighted_avg = round(total_value / total_qty, 2) if total_qty else None
 
-        return ads, weighted_avg
+                ads = sorted(ads, key=lambda x: x["USDT"], reverse=True)
 
-    except Exception:
-        return [], None
+                for i, ad in enumerate(ads):
+                    ad["Tag"] = "🐋 WHALE" if i < 3 else ""
+
+                return ads, weighted_avg, threshold
+
+        except Exception:
+            continue
+
+    return [], None, None
 
 
 # ── NEW TRACKING ────────────────────────────────────────────────────────────
@@ -1575,8 +1588,8 @@ def detect_whale_alerts(db, threshold=0.2):
 
 
 # ── REPLACE MARKET FETCH ────────────────────────────────────────────────────
-buy_ads, buy_wavg = fetch_binance_p2p_filtered("BUY", 5000)
-sell_ads, sell_wavg = fetch_binance_p2p_filtered("SELL", 5000)
+buy_ads, buy_wavg, buy_threshold = fetch_binance_p2p_filtered("BUY", 5000)
+sell_ads, sell_wavg, sell_threshold = fetch_binance_p2p_filtered("SELL", 5000)
 
 # keep compatibility
 buy_prices  = [a["Price"] for a in buy_ads]
@@ -1594,13 +1607,17 @@ save_tracking(db, sell_ads, "SELL")
 # 🔥 ADD AFTER SECTION 1
 # ═════════════════════════════════════════════════════════════════════════════
 
-st.markdown("## 🧠 Institutional Liquidity (≥ 5000 USDT)")
+st.markdown("## 🧠 Institutional Liquidity")
 
 c1, c2 = st.columns(2)
 with c1:
     st.metric("BUY Weighted Avg", f"₹{buy_wavg}" if buy_wavg else "—")
+    if buy_threshold:
+        st.caption(f"Using liquidity filter ≥ {int(buy_threshold)} USDT")
 with c2:
     st.metric("SELL Weighted Avg", f"₹{sell_wavg}" if sell_wavg else "—")
+    if sell_threshold:
+        st.caption(f"Using liquidity filter ≥ {int(sell_threshold)} USDT")
 
 import pandas as pd
 
