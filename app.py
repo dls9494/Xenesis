@@ -644,17 +644,44 @@ def get_db():
 db = get_db()
 
 # ── Binance P2P ───────────────────────────────────────────────────────────────
+BULK_MIN_USDT = 5000  # minimum available quantity filter
+
 @st.cache_data(ttl=10)
-def fetch_binance_p2p(side: str):
+def fetch_binance_p2p_full(side: str, rows: int = 20) -> list[dict]:
+    """Fetch full ad data from Binance P2P. Returns list of parsed ad dicts."""
     url = "https://p2p.binance.com/bapi/c2c/v2/friendly/c2c/adv/search"
-    payload = {"asset": "USDT", "fiat": "INR", "merchantCheck": False,
-               "page": 1, "payTypes": [], "publisherType": None,
-               "rows": 10, "tradeType": side}
+    payload = {
+        "asset": "USDT", "fiat": "INR", "merchantCheck": False,
+        "page": 1, "payTypes": [], "publisherType": None,
+        "rows": rows, "tradeType": side,
+    }
     try:
-        r = requests.post(url, json=payload, headers={"Content-Type": "application/json"}, timeout=8)
-        return [float(ad["adv"]["price"]) for ad in r.json().get("data", [])]
+        r = requests.post(url, json=payload,
+                          headers={"Content-Type": "application/json"}, timeout=8)
+        ads = []
+        for item in r.json().get("data", []):
+            adv = item.get("adv", {})
+            advertiser = item.get("advertiser", {})
+            ads.append({
+                "price":          float(adv.get("price", 0)),
+                "available_usdt": float(adv.get("surplusAmount", 0)),
+                "min_order_inr":  float(adv.get("minSingleTransAmount", 0)),
+                "max_order_inr":  float(adv.get("dynamicMaxSingleTransAmount", adv.get("maxSingleTransAmount", 0))),
+                "pay_types":      [m.get("identifier","") for m in adv.get("tradeMethods", [])],
+                "nickname":       advertiser.get("nickName", "—"),
+                "order_count":    int(advertiser.get("monthOrderCount", 0)),
+                "completion_pct": float(advertiser.get("monthFinishRate", 0)) * 100,
+                "is_merchant":    advertiser.get("userType", "") == "merchant",
+            })
+        return ads
     except Exception:
         return []
+
+def prices_from_ads(ads: list[dict]) -> list[float]:
+    return [a["price"] for a in ads]
+
+def filter_bulk_ads(ads: list[dict], min_usdt: float = BULK_MIN_USDT) -> list[dict]:
+    return [a for a in ads if a["available_usdt"] >= min_usdt]
 
 CITY_PREMIUM = {
     "Hyderabad": 0.003, "Mumbai": 0.005, "Delhi": 0.004,
@@ -681,18 +708,34 @@ def predict_spread():
 
 # ── Session state ─────────────────────────────────────────────────────────────
 if "trader_name" not in st.session_state:
-    st.session_state.trader_name = "David"
+    st.session_state.trader_name = "Desk Officer"
 if "city" not in st.session_state:
     st.session_state.city = "Hyderabad"
 if "auto_refresh" not in st.session_state:
     st.session_state.auto_refresh = True
 
 # ── Fetch market data ─────────────────────────────────────────────────────────
-buy_prices  = fetch_binance_p2p("BUY")
-sell_prices = fetch_binance_p2p("SELL")
+buy_ads  = fetch_binance_p2p_full("BUY",  rows=20)
+sell_ads = fetch_binance_p2p_full("SELL", rows=20)
 
+buy_prices  = prices_from_ads(buy_ads)
+sell_prices = prices_from_ads(sell_ads)
+
+# All-ad averages
 buy_avg  = round(np.average(buy_prices),  2) if buy_prices  else None
 sell_avg = round(np.average(sell_prices), 2) if sell_prices else None
+
+# Bulk-filtered (≥5000 USDT available)
+bulk_buy_ads   = filter_bulk_ads(buy_ads)
+bulk_sell_ads  = filter_bulk_ads(sell_ads)
+bulk_buy_prices  = prices_from_ads(bulk_buy_ads)
+bulk_sell_prices = prices_from_ads(bulk_sell_ads)
+bulk_buy_avg  = round(np.average(bulk_buy_prices),  2) if bulk_buy_prices  else None
+bulk_sell_avg = round(np.average(bulk_sell_prices), 2) if bulk_sell_prices else None
+bulk_spread   = round(bulk_sell_avg - bulk_buy_avg, 2) if (bulk_buy_avg and bulk_sell_avg) else None
+bulk_spread_pct = round(bulk_spread / bulk_buy_avg * 100, 3) if (bulk_spread and bulk_buy_avg) else None
+total_bulk_buy_liq  = round(sum(a["available_usdt"] for a in bulk_buy_ads), 2)
+total_bulk_sell_liq = round(sum(a["available_usdt"] for a in bulk_sell_ads), 2)
 
 city    = st.session_state.city
 premium = CITY_PREMIUM.get(city, 0.003)
@@ -750,12 +793,15 @@ city        = st.session_state.city
 premium     = CITY_PREMIUM.get(city, 0.003)
 
 # ── TICKER BAR ───────────────────────────────────────────────────────────────
-buy_str   = f"₹{our_buy:,.2f}"  if our_buy  else "—"
-sell_str  = f"₹{our_sell:,.2f}" if our_sell else "—"
-sprd_str  = f"₹{spread:,.2f}"  if spread   else "—"
-sprdp_str = f"{spread_pct}%"   if spread_pct else "—"
-mkt_b     = f"₹{buy_avg:,.2f}" if buy_avg  else "—"
-mkt_s     = f"₹{sell_avg:,.2f}" if sell_avg else "—"
+buy_str      = f"₹{our_buy:,.2f}"       if our_buy       else "—"
+sell_str     = f"₹{our_sell:,.2f}"      if our_sell      else "—"
+sprd_str     = f"₹{spread:,.2f}"        if spread        else "—"
+sprdp_str    = f"{spread_pct}%"         if spread_pct    else "—"
+mkt_b        = f"₹{buy_avg:,.2f}"       if buy_avg       else "—"
+mkt_s        = f"₹{sell_avg:,.2f}"      if sell_avg      else "—"
+blk_b_str    = f"₹{bulk_buy_avg:,.2f}"  if bulk_buy_avg  else "—"
+blk_s_str    = f"₹{bulk_sell_avg:,.2f}" if bulk_sell_avg else "—"
+blk_sp_str   = f"₹{bulk_spread:,.2f}"   if bulk_spread   else "—"
 
 st.markdown(f"""
 <div class="ticker-wrap">
@@ -786,8 +832,18 @@ st.markdown(f"""
     </div>
     <span class="ticker-sep">·</span>
     <div class="ticker-item">
-      <span class="ticker-label">Spread %</span>
-      <span class="ticker-val">{sprdp_str}</span>
+      <span class="ticker-label">Bulk Buy ≥5K</span>
+      <span class="ticker-val ticker-up">{blk_b_str}</span>
+    </div>
+    <span class="ticker-sep">·</span>
+    <div class="ticker-item">
+      <span class="ticker-label">Bulk Sell ≥5K</span>
+      <span class="ticker-val ticker-down">{blk_s_str}</span>
+    </div>
+    <span class="ticker-sep">·</span>
+    <div class="ticker-item">
+      <span class="ticker-label">Bulk Spread</span>
+      <span class="ticker-val">{blk_sp_str}</span>
     </div>
     <span class="ticker-sep">·</span>
     <div class="ticker-item">
@@ -835,33 +891,212 @@ if not buy_avg:
       <span>Binance P2P data unavailable. Check your internet connection or try refreshing.</span>
     </div>""", unsafe_allow_html=True)
 
-with st.expander("View Full Order Book — Binance P2P"):
-    if buy_prices and sell_prices:
+with st.expander("View Full Order Book — All Ads (Binance P2P)"):
+    if buy_ads and sell_ads:
         ob1, ob2 = st.columns(2)
+
+        def _pay_icons(pay_list):
+            icons = {"UPI": "UPI", "IMPS": "IMPS", "NEFT": "NEFT",
+                     "BankTransfer": "Bank", "Paytm": "Paytm", "PhonePe": "PhonePe"}
+            return " · ".join(icons.get(p, p) for p in pay_list[:3]) or "—"
+
+        def _ad_rows_html(ads, color_rgb):
+            html = ""
+            for i, a in enumerate(ads, 1):
+                bar_w = min(100, int(a["available_usdt"] / 500))
+                bulk_tag = (
+                    f'<span style="background:rgba({color_rgb},0.15);color:rgba({color_rgb},1);'
+                    f'border-radius:3px;padding:1px 5px;font-size:0.65rem;font-weight:700;margin-left:4px;">BULK</span>'
+                    if a["available_usdt"] >= BULK_MIN_USDT else ""
+                )
+                merch = "★ " if a["is_merchant"] else ""
+                html += f"""
+                <tr>
+                  <td class="td-muted">#{i}</td>
+                  <td class="td-gold" style="font-weight:600;">₹{a['price']:,.2f}</td>
+                  <td>
+                    <div style="font-size:0.78rem;">{merch}{a['nickname']}</div>
+                    <div style="font-size:0.68rem;color:var(--muted);">{a['order_count']} orders · {a['completion_pct']:.0f}%</div>
+                  </td>
+                  <td>
+                    <div style="font-family:'DM Mono',monospace;font-size:0.8rem;">{a['available_usdt']:,.0f} USDT{bulk_tag}</div>
+                    <div style="height:4px;background:rgba({color_rgb},0.25);border-radius:2px;margin-top:3px;">
+                      <div style="height:4px;background:rgba({color_rgb},0.8);border-radius:2px;width:{bar_w}%;"></div>
+                    </div>
+                  </td>
+                  <td style="color:var(--muted2);font-size:0.75rem;">{_pay_icons(a['pay_types'])}</td>
+                  <td style="font-size:0.75rem;color:var(--muted);">
+                    ₹{a['min_order_inr']:,.0f} – ₹{a['max_order_inr']:,.0f}
+                  </td>
+                </tr>"""
+            return html
+
         with ob1:
-            st.markdown("""
-            <div style="font-size:0.68rem;text-transform:uppercase;letter-spacing:0.12em;color:var(--green);font-weight:600;margin-bottom:12px;">
-              ▲ BUY ORDERS (Market Buying USDT)
-            </div>""", unsafe_allow_html=True)
-            rows_html = "".join([f"""
-              <tr>
-                <td class="td-muted">#{i}</td>
-                <td class="td-gold">₹{p:,.2f}</td>
-                <td><div style="height:6px;background:rgba(34,197,94,{0.6-i*0.05:.2f});border-radius:3px;width:{100-i*8}%;"></div></td>
-              </tr>""" for i, p in enumerate(buy_prices, 1)])
-            st.markdown(f'<table class="x-table"><thead><tr><th>#</th><th>Price</th><th>Depth</th></tr></thead><tbody>{rows_html}</tbody></table>', unsafe_allow_html=True)
+            st.markdown("""<div style="font-size:0.68rem;text-transform:uppercase;letter-spacing:0.12em;
+              color:var(--green);font-weight:600;margin-bottom:10px;">▲ BUY ORDERS — Market Buying USDT</div>""",
+              unsafe_allow_html=True)
+            rows_html = _ad_rows_html(buy_ads, "34,197,94")
+            st.markdown(f'''<table class="x-table">
+              <thead><tr><th>#</th><th>Price</th><th>Advertiser</th><th>Available</th><th>Payment</th><th>Limits</th></tr></thead>
+              <tbody>{rows_html}</tbody></table>''', unsafe_allow_html=True)
+
         with ob2:
-            st.markdown("""
-            <div style="font-size:0.68rem;text-transform:uppercase;letter-spacing:0.12em;color:var(--red);font-weight:600;margin-bottom:12px;">
-              ▼ SELL ORDERS (Market Selling USDT)
-            </div>""", unsafe_allow_html=True)
-            rows_html = "".join([f"""
-              <tr>
-                <td class="td-muted">#{i}</td>
-                <td class="td-gold">₹{p:,.2f}</td>
-                <td><div style="height:6px;background:rgba(239,68,68,{0.6-i*0.05:.2f});border-radius:3px;width:{100-i*8}%;"></div></td>
-              </tr>""" for i, p in enumerate(sell_prices, 1)])
-            st.markdown(f'<table class="x-table"><thead><tr><th>#</th><th>Price</th><th>Depth</th></tr></thead><tbody>{rows_html}</tbody></table>', unsafe_allow_html=True)
+            st.markdown("""<div style="font-size:0.68rem;text-transform:uppercase;letter-spacing:0.12em;
+              color:var(--red);font-weight:600;margin-bottom:10px;">▼ SELL ORDERS — Market Selling USDT</div>""",
+              unsafe_allow_html=True)
+            rows_html = _ad_rows_html(sell_ads, "239,68,68")
+            st.markdown(f'''<table class="x-table">
+              <thead><tr><th>#</th><th>Price</th><th>Advertiser</th><th>Available</th><th>Payment</th><th>Limits</th></tr></thead>
+              <tbody>{rows_html}</tbody></table>''', unsafe_allow_html=True)
+
+# ═════════════════════════════════════════════════════════════════════════════
+# SECTION 1B — BULK LIQUIDITY INTELLIGENCE (≥5000 USDT)
+# ═════════════════════════════════════════════════════════════════════════════
+st.markdown("""
+<div class="section-header">
+  <div class="section-num" style="color:rgba(201,168,76,0.25);">1B</div>
+  <div class="section-text">
+    <div class="section-title">Bulk Liquidity Intelligence</div>
+    <div class="section-sub">Filtered ads · Available Quantity ≥ 5,000 USDT · High-value counterparty pricing</div>
+  </div>
+  <div class="section-rule"></div>
+</div>
+""", unsafe_allow_html=True)
+
+# Summary metric row
+bk1, bk2, bk3, bk4, bk5, bk6 = st.columns(6)
+with bk1:
+    st.metric("Bulk Buy Avg", f"₹{bulk_buy_avg:,.2f}" if bulk_buy_avg else "—",
+              delta=f"vs all: ₹{round(bulk_buy_avg - buy_avg, 2):+}" if (bulk_buy_avg and buy_avg) else None)
+with bk2:
+    st.metric("Bulk Sell Avg", f"₹{bulk_sell_avg:,.2f}" if bulk_sell_avg else "—",
+              delta=f"vs all: ₹{round(bulk_sell_avg - sell_avg, 2):+}" if (bulk_sell_avg and sell_avg) else None)
+with bk3:
+    st.metric("Bulk Spread", f"₹{bulk_spread:,.2f}" if bulk_spread else "—")
+with bk4:
+    st.metric("Bulk Spread %", f"{bulk_spread_pct}%" if bulk_spread_pct else "—")
+with bk5:
+    st.metric("Buy-Side Liquidity", f"{total_bulk_buy_liq:,.0f} USDT" if total_bulk_buy_liq else "—",
+              delta=f"{len(bulk_buy_ads)} advertisers")
+with bk6:
+    st.metric("Sell-Side Liquidity", f"{total_bulk_sell_liq:,.0f} USDT" if total_bulk_sell_liq else "—",
+              delta=f"{len(bulk_sell_ads)} advertisers")
+
+# Bulk advertiser detail tables
+if bulk_buy_ads or bulk_sell_ads:
+    bl1, bl2 = st.columns(2, gap="large")
+
+    def _bulk_detail_html(ads, side_color, side_label):
+        if not ads:
+            return f'<div style="color:var(--muted);font-size:0.82rem;padding:16px 0;">No {side_label} ads with ≥ 5,000 USDT available.</div>'
+
+        # sort by price ascending for buy, descending for sell (best rate first)
+        sorted_ads = sorted(ads, key=lambda x: x["price"], reverse=(side_label=="SELL"))
+
+        # price range
+        prices  = [a["price"] for a in sorted_ads]
+        low, high = min(prices), max(prices)
+
+        rows = ""
+        for rank, a in enumerate(sorted_ads, 1):
+            bar_pct = int((a["available_usdt"] / max(a2["available_usdt"] for a2 in ads)) * 100)
+            merch_badge = (
+                '<span style="background:rgba(201,168,76,0.15);color:var(--gold2);'
+                'border-radius:3px;padding:1px 5px;font-size:0.62rem;font-weight:700;margin-left:5px;">MERCHANT</span>'
+                if a["is_merchant"] else ""
+            )
+            comp_color = "var(--green)" if a["completion_pct"] >= 95 else "var(--amber)" if a["completion_pct"] >= 85 else "var(--red)"
+            rows += f"""
+            <tr>
+              <td style="font-size:0.72rem;color:var(--muted);text-align:center;font-weight:700;">#{rank}</td>
+              <td>
+                <div style="font-size:0.85rem;font-weight:600;color:{side_color};">₹{a['price']:,.2f}</div>
+              </td>
+              <td>
+                <div style="font-size:0.8rem;">{a['nickname']}{merch_badge}</div>
+                <div style="font-size:0.68rem;color:var(--muted);margin-top:1px;">{a['order_count']} orders</div>
+              </td>
+              <td>
+                <div style="font-family:'DM Mono',monospace;font-size:0.82rem;color:var(--text);">{a['available_usdt']:,.0f}</div>
+                <div style="height:4px;background:rgba(255,255,255,0.06);border-radius:2px;margin-top:3px;width:80px;">
+                  <div style="height:4px;background:{side_color};opacity:0.7;border-radius:2px;width:{bar_pct}%;"></div>
+                </div>
+              </td>
+              <td style="font-family:'DM Mono',monospace;font-size:0.75rem;color:{comp_color};">{a['completion_pct']:.1f}%</td>
+              <td style="font-size:0.72rem;color:var(--muted2);">₹{a['min_order_inr']:,.0f}–{a['max_order_inr']:,.0f}</td>
+            </tr>"""
+        header = f"""
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px;">
+          <div style="font-size:0.68rem;text-transform:uppercase;letter-spacing:0.12em;color:{side_color};font-weight:600;">
+            {side_label} SIDE · {len(sorted_ads)} BULK ADS
+          </div>
+          <div style="font-family:'DM Mono',monospace;font-size:0.75rem;color:var(--muted);">
+            Range: ₹{low:,.2f} – ₹{high:,.2f}
+          </div>
+        </div>"""
+        table = f"""<table class="x-table">
+          <thead><tr>
+            <th style="text-align:center;">#</th>
+            <th>Price</th>
+            <th>Advertiser</th>
+            <th>Avail. (USDT)</th>
+            <th>Completion</th>
+            <th>INR Limits</th>
+          </tr></thead>
+          <tbody>{rows}</tbody>
+        </table>"""
+        return header + table
+
+    with bl1:
+        st.markdown(
+            f'<div class="gcard gcard-green">{_bulk_detail_html(bulk_buy_ads, "var(--green)", "BUY")}</div>',
+            unsafe_allow_html=True
+        )
+    with bl2:
+        st.markdown(
+            f'<div class="gcard gcard-red">{_bulk_detail_html(bulk_sell_ads, "var(--red)", "SELL")}</div>',
+            unsafe_allow_html=True
+        )
+
+    # Bulk pricing insight card
+    if bulk_buy_avg and bulk_sell_avg and buy_avg and sell_avg:
+        buy_diff  = round(bulk_buy_avg - buy_avg, 2)
+        sell_diff = round(bulk_sell_avg - sell_avg, 2)
+        buy_dir   = "higher" if buy_diff > 0 else "lower"
+        sell_dir  = "higher" if sell_diff > 0 else "lower"
+        insight_color = "var(--gold2)"
+        st.markdown(f"""
+        <div class="gcard gcard-gold" style="margin-top:12px;">
+          <div style="font-size:0.65rem;text-transform:uppercase;letter-spacing:0.14em;color:var(--muted);font-weight:600;margin-bottom:10px;">
+            ◈ Bulk Pricing Insight
+          </div>
+          <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:20px;font-size:0.83rem;">
+            <div>
+              <div style="color:var(--muted2);font-size:0.72rem;margin-bottom:4px;">Buy-side delta vs market</div>
+              <div style="font-family:'DM Mono',monospace;color:{'var(--green)' if buy_diff >= 0 else 'var(--red)'};">
+                {'+' if buy_diff >= 0 else ''}₹{buy_diff:,.2f} ({buy_dir})
+              </div>
+            </div>
+            <div>
+              <div style="color:var(--muted2);font-size:0.72rem;margin-bottom:4px;">Sell-side delta vs market</div>
+              <div style="font-family:'DM Mono',monospace;color:{'var(--red)' if sell_diff >= 0 else 'var(--green)'};">
+                {'+' if sell_diff >= 0 else ''}₹{sell_diff:,.2f} ({sell_dir})
+              </div>
+            </div>
+            <div>
+              <div style="color:var(--muted2);font-size:0.72rem;margin-bottom:4px;">Total bulk liquidity</div>
+              <div style="font-family:'DM Mono',monospace;color:var(--gold2);">
+                {total_bulk_buy_liq + total_bulk_sell_liq:,.0f} USDT
+              </div>
+            </div>
+          </div>
+        </div>
+        """, unsafe_allow_html=True)
+else:
+    st.markdown(f"""<div class="x-alert x-alert-warn">
+      <span class="x-alert-icon">⚠</span>
+      <span>No advertisers found with ≥ {BULK_MIN_USDT:,} USDT available in current P2P data.</span>
+    </div>""", unsafe_allow_html=True)
 
 # ═════════════════════════════════════════════════════════════════════════════
 # SECTION 2 — AI PREDICTION
