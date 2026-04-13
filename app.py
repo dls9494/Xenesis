@@ -658,69 +658,113 @@ def get_db():
 db = get_db()
 
 # ── Binance P2P ───────────────────────────────────────────────────────────────
-@st.cache_data(ttl=10)
+def _parse_p2p_ads(data, threshold):
+    ads = []
+    total_value = 0
+    total_qty   = 0
+    for ad in data:
+        adv      = ad["adv"]
+        price    = float(adv["price"])
+        available = float(adv.get("surplusAmount", 0))
+        tradable  = float(adv.get("tradableQuantity", 0))
+        quantity  = max(available, tradable)
+        if quantity >= threshold:
+            total_value += price * quantity
+            total_qty   += quantity
+            ads.append({
+                "Trader":  ad["advertiser"]["nickName"],
+                "Price":   price,
+                "USDT":    quantity,
+                "Min INR": adv.get("minSingleTransAmount"),
+                "Max INR": adv.get("maxSingleTransAmount"),
+            })
+    return ads, total_value, total_qty
+
+
+@st.cache_data(ttl=30)
 def fetch_binance_p2p_filtered(side: str, min_usdt: float = 5000):
     thresholds = [min_usdt, 3000, 2000, 1000]
 
-    for threshold in thresholds:
-        url = "https://p2p.binance.com/bapi/c2c/v2/friendly/c2c/adv/search"
+    session = requests.Session()
+    session.headers.update({
+        "User-Agent":      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+        "Content-Type":    "application/json",
+        "Accept":          "application/json, text/plain, */*",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Origin":          "https://p2p.binance.com",
+        "Referer":         "https://p2p.binance.com/en/trade/all-payments/USDT?fiat=INR",
+        "Cache-Control":   "no-cache",
+    })
 
+    last_error = None
+
+    for threshold in thresholds:
         payload = {
-            "asset": "USDT",
-            "fiat": "INR",
+            "asset":         "USDT",
+            "fiat":          "INR",
             "merchantCheck": False,
-            "page": 1,
-            "payTypes": [],
+            "page":          1,
+            "payTypes":      [],
             "publisherType": None,
-            "rows": 50,
-            "tradeType": side
+            "rows":          50,
+            "tradeType":     side,
         }
 
-        try:
-            r = requests.post(
-                url,
-                json=payload,
-                headers={"Content-Type": "application/json"},
-                timeout=8
-            )
+        endpoints = [
+            "https://p2p.binance.com/bapi/c2c/v2/friendly/c2c/adv/search",
+            "https://p2p.binance.com/bapi/c2c/v1/friendly/c2c/adv/search",
+        ]
 
-            data = r.json().get("data", [])
+        for url in endpoints:
+            try:
+                r = session.post(url, json=payload, timeout=12)
 
-            ads = []
-            total_value = 0
-            total_qty = 0
+                if r.status_code == 403:
+                    last_error = "403 Forbidden — Binance is blocking this server IP. This is common on Streamlit Cloud. Run locally or on a VPS for live data."
+                    continue
+                if r.status_code == 429:
+                    last_error = "429 Rate limited by Binance. Will retry next refresh."
+                    continue
+                if r.status_code != 200:
+                    last_error = f"HTTP {r.status_code}"
+                    continue
 
-            for ad in data:
-                adv = ad["adv"]
+                resp_json = r.json()
+                if not resp_json.get("success", True):
+                    last_error = f"Binance API error: {resp_json.get('message', 'unknown')}"
+                    continue
 
-                price = float(adv["price"])
-                available = float(adv.get("surplusAmount", 0))
-                tradable = float(adv.get("tradableQuantity", 0))
-                quantity = max(available, tradable)
+                data = resp_json.get("data", [])
+                if not data:
+                    last_error = f"Binance returned 0 listings (threshold={threshold} USDT)"
+                    continue
 
-                if quantity >= threshold:
-                    total_value += price * quantity
-                    total_qty += quantity
+                ads, total_value, total_qty = _parse_p2p_ads(data, threshold)
 
-                    ads.append({
-                        "Trader": ad["advertiser"]["nickName"],
-                        "Price": price,
-                        "USDT": quantity,
-                        "Min INR": adv.get("minSingleTransAmount"),
-                        "Max INR": adv.get("maxSingleTransAmount"),
-                    })
+                if ads:
+                    weighted_avg = round(total_value / total_qty, 2) if total_qty else None
+                    ads = sorted(ads, key=lambda x: x["USDT"], reverse=True)
+                    for i, ad in enumerate(ads):
+                        ad["Tag"] = "🐋 WHALE" if i < 3 else ""
+                    if "market_fetch_error" in st.session_state:
+                        del st.session_state["market_fetch_error"]
+                    return ads, weighted_avg, threshold
 
-            if ads:
-                weighted_avg = round(total_value / total_qty, 2) if total_qty else None
-                ads = sorted(ads, key=lambda x: x["USDT"], reverse=True)
-                for i, ad in enumerate(ads):
-                    ad["Tag"] = "🐋 WHALE" if i < 3 else ""
-                return ads, weighted_avg, threshold
+                last_error = f"No ads >= {threshold} USDT after filtering"
 
-        except Exception:
-            continue
+            except requests.exceptions.ConnectionError:
+                last_error = "Connection error — Binance P2P unreachable. Streamlit Cloud blocks outbound P2P calls. Run locally or on a VPS."
+                continue
+            except requests.exceptions.Timeout:
+                last_error = "Request timed out (12s)"
+                continue
+            except Exception as e:
+                last_error = f"{type(e).__name__}: {e}"
+                continue
 
+    st.session_state["market_fetch_error"] = last_error
     return [], None, None
+
 
 def predict_spread():
     rows = db.execute("SELECT ts, spread FROM market_history ORDER BY id DESC LIMIT 30").fetchall()
@@ -782,6 +826,11 @@ sell_avg = round(np.average(sell_prices), 2) if sell_prices else None
 
 save_tracking(db, buy_ads,  "BUY")
 save_tracking(db, sell_ads, "SELL")
+
+# Show fetch error prominently if data is missing
+if not buy_avg and not sell_avg:
+    _err = st.session_state.get("market_fetch_error", "Unknown error — check Streamlit logs.")
+    st.error(f"⚠️ Live market data unavailable: {_err}")
 
 city    = st.session_state.city
 premium = CITY_PREMIUM.get(city, 0.003)
