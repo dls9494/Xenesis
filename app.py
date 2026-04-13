@@ -645,7 +645,7 @@ db = get_db()
 
 # ── Binance P2P ───────────────────────────────────────────────────────────────
 @st.cache_data(ttl=10)
-    def fetch_binance_p2p_filtered(side: str, min_usdt: float = 5000):
+def fetch_binance_p2p_filtered(side: str, min_usdt: float = 5000):
     url = "https://p2p.binance.com/bapi/c2c/v2/friendly/c2c/adv/search"
 
     payload = {
@@ -660,7 +660,13 @@ db = get_db()
     }
 
     try:
-        r = requests.post(url, json=payload, headers={"Content-Type": "application/json"}, timeout=8)
+        r = requests.post(
+            url,
+            json=payload,
+            headers={"Content-Type": "application/json"},
+            timeout=8
+        )
+
         data = r.json().get("data", [])
 
         ads = []
@@ -683,11 +689,9 @@ db = get_db()
                     "Trader": ad["advertiser"]["nickName"],
                     "Price": price,
                     "USDT": quantity,
-                    "Min INR": adv.get("minSingleTransAmount"),
-                    "Max INR": adv.get("maxSingleTransAmount"),
                 })
 
-        weighted_avg = round(total_value / total_qty, 2) if total_qty > 0 else None
+        weighted_avg = round(total_value / total_qty, 2) if total_qty else None
 
         ads = sorted(ads, key=lambda x: x["USDT"], reverse=True)
 
@@ -698,12 +702,6 @@ db = get_db()
 
     except Exception:
         return [], None
-
-CITY_PREMIUM = {
-    "Hyderabad": 0.003, "Mumbai": 0.005, "Delhi": 0.004,
-    "Bangalore": 0.003, "Chennai": 0.004, "Kolkata": 0.002,
-    "Pune": 0.003, "Ahmedabad": 0.002, "Jaipur": 0.001, "Lucknow": 0.001,
-}
 
 def predict_spread():
     rows = db.execute("SELECT ts, spread FROM market_history ORDER BY id DESC LIMIT 30").fetchall()
