@@ -645,7 +645,6 @@ db = get_db()
 
 # ── Binance P2P ───────────────────────────────────────────────────────────────
 @st.cache_data(ttl=10)
-def fetch_binance_p2p(side: str):
     def fetch_binance_p2p_filtered(side: str, min_usdt: float = 5000):
     url = "https://p2p.binance.com/bapi/c2c/v2/friendly/c2c/adv/search"
 
