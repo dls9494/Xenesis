@@ -646,62 +646,67 @@ db = get_db()
 # ── Binance P2P ───────────────────────────────────────────────────────────────
 @st.cache_data(ttl=10)
 def fetch_binance_p2p_filtered(side: str, min_usdt: float = 5000):
-    url = "https://p2p.binance.com/bapi/c2c/v2/friendly/c2c/adv/search"
+    thresholds = [min_usdt, 3000, 2000, 1000]
 
-    payload = {
-        "asset": "USDT",
-        "fiat": "INR",
-        "merchantCheck": False,
-        "page": 1,
-        "payTypes": [],
-        "publisherType": None,
-        "rows": 50,
-        "tradeType": side
-    }
+    for threshold in thresholds:
+        url = "https://p2p.binance.com/bapi/c2c/v2/friendly/c2c/adv/search"
 
-    try:
-        r = requests.post(
-            url,
-            json=payload,
-            headers={"Content-Type": "application/json"},
-            timeout=8
-        )
+        payload = {
+            "asset": "USDT",
+            "fiat": "INR",
+            "merchantCheck": False,
+            "page": 1,
+            "payTypes": [],
+            "publisherType": None,
+            "rows": 50,
+            "tradeType": side
+        }
 
-        data = r.json().get("data", [])
+        try:
+            r = requests.post(
+                url,
+                json=payload,
+                headers={"Content-Type": "application/json"},
+                timeout=8
+            )
 
-        ads = []
-        total_value = 0
-        total_qty = 0
+            data = r.json().get("data", [])
 
-        for ad in data:
-            adv = ad["adv"]
+            ads = []
+            total_value = 0
+            total_qty = 0
 
-            price = float(adv["price"])
-            available = float(adv.get("surplusAmount", 0))
-            tradable = float(adv.get("tradableQuantity", 0))
-            quantity = max(available, tradable)
+            for ad in data:
+                adv = ad["adv"]
 
-            if quantity >= min_usdt:
-                total_value += price * quantity
-                total_qty += quantity
+                price = float(adv["price"])
+                available = float(adv.get("surplusAmount", 0))
+                tradable = float(adv.get("tradableQuantity", 0))
+                quantity = max(available, tradable)
 
-                ads.append({
-                    "Trader": ad["advertiser"]["nickName"],
-                    "Price": price,
-                    "USDT": quantity,
-                })
+                if quantity >= threshold:
+                    total_value += price * quantity
+                    total_qty += quantity
 
-        weighted_avg = round(total_value / total_qty, 2) if total_qty else None
+                    ads.append({
+                        "Trader": ad["advertiser"]["nickName"],
+                        "Price": price,
+                        "USDT": quantity,
+                        "Min INR": adv.get("minSingleTransAmount"),
+                        "Max INR": adv.get("maxSingleTransAmount"),
+                    })
 
-        ads = sorted(ads, key=lambda x: x["USDT"], reverse=True)
+            if ads:
+                weighted_avg = round(total_value / total_qty, 2) if total_qty else None
+                ads = sorted(ads, key=lambda x: x["USDT"], reverse=True)
+                for i, ad in enumerate(ads):
+                    ad["Tag"] = "🐋 WHALE" if i < 3 else ""
+                return ads, weighted_avg, threshold
 
-        for i, ad in enumerate(ads):
-            ad["Tag"] = "🐋 WHALE" if i < 3 else ""
+        except Exception:
+            continue
 
-        return ads, weighted_avg
-
-    except Exception:
-        return [], None
+    return [], None, None
 
 def predict_spread():
     rows = db.execute("SELECT ts, spread FROM market_history ORDER BY id DESC LIMIT 30").fetchall()
