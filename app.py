@@ -646,15 +646,59 @@ db = get_db()
 # ── Binance P2P ───────────────────────────────────────────────────────────────
 @st.cache_data(ttl=10)
 def fetch_binance_p2p(side: str):
+    def fetch_binance_p2p_filtered(side: str, min_usdt: float = 5000):
     url = "https://p2p.binance.com/bapi/c2c/v2/friendly/c2c/adv/search"
-    payload = {"asset": "USDT", "fiat": "INR", "merchantCheck": False,
-               "page": 1, "payTypes": [], "publisherType": None,
-               "rows": 10, "tradeType": side}
+
+    payload = {
+        "asset": "USDT",
+        "fiat": "INR",
+        "merchantCheck": False,
+        "page": 1,
+        "payTypes": [],
+        "publisherType": None,
+        "rows": 50,
+        "tradeType": side
+    }
+
     try:
         r = requests.post(url, json=payload, headers={"Content-Type": "application/json"}, timeout=8)
-        return [float(ad["adv"]["price"]) for ad in r.json().get("data", [])]
+        data = r.json().get("data", [])
+
+        ads = []
+        total_value = 0
+        total_qty = 0
+
+        for ad in data:
+            adv = ad["adv"]
+
+            price = float(adv["price"])
+            available = float(adv.get("surplusAmount", 0))
+            tradable = float(adv.get("tradableQuantity", 0))
+            quantity = max(available, tradable)
+
+            if quantity >= min_usdt:
+                total_value += price * quantity
+                total_qty += quantity
+
+                ads.append({
+                    "Trader": ad["advertiser"]["nickName"],
+                    "Price": price,
+                    "USDT": quantity,
+                    "Min INR": adv.get("minSingleTransAmount"),
+                    "Max INR": adv.get("maxSingleTransAmount"),
+                })
+
+        weighted_avg = round(total_value / total_qty, 2) if total_qty > 0 else None
+
+        ads = sorted(ads, key=lambda x: x["USDT"], reverse=True)
+
+        for i, ad in enumerate(ads):
+            ad["Tag"] = "🐋 WHALE" if i < 3 else ""
+
+        return ads, weighted_avg
+
     except Exception:
-        return []
+        return [], None
 
 CITY_PREMIUM = {
     "Hyderabad": 0.003, "Mumbai": 0.005, "Delhi": 0.004,
